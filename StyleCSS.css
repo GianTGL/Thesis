@@ -52,3 +52,76 @@
     box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1),
                 0 10px 10px -5px rgba(0, 0, 0, 0.04);
 }
+
+html.dark, 
+html.dark body {
+    background-color: #111111 !important;
+    color: #e5e5e5 !important;
+}
+
+html.dark .card {
+    background-color: #1e1e1e !important;
+    border-color: #333 !important;
+}
+
+html.dark input,
+html.dark select,
+html.dark textarea {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+    border-color: #444 !important;
+}
+
+html.dark button {
+    background-color: #333 !important;
+    color: #eee !important;
+    border-color: #555 !important;
+}
+
+html.dark button:hover {
+    background-color: #444 !important;
+}
+
+html.dark .file-item {
+    background-color: #1c1c1c !important;
+    color: #ddd !important;
+    border-color: #333 !important;
+}
+
+html.dark .text-gray-700,
+html.dark .text-gray-800,
+html.dark .text-gray-500 {
+    color: #ccc !important;
+}
+
+html.dark .border {
+    border-color: #333 !important;
+}
+
+html.dark .bg-white {
+    background-color: #1e1e1e !important;
+}
+
+html.dark #settingsMenu {
+    background-color: #1e1e1e !important;
+    border-color: #333 !important;
+}
+
+html.dark .hover\\:bg-gray-100:hover {
+    background-color: #2d2d2d !important;
+}
+
+
+html:not(.dark) #settingsMenu {
+    background-color: #ffffff !important;
+    color: #333 !important;
+    border-color: #ddd !important;
+}
+
+html:not(.dark) #settingsMenu button {
+    color: #333 !important;
+}
+
+html:not(.dark) #settingsMenu button:hover {
+    background-color: #f5f5f5 !important;
+}
