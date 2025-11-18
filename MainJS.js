@@ -18,7 +18,12 @@ import {
     getFirestore,
     doc,
     setDoc,
-    onSnapshot
+    onSnapshot,
+    getDocs,
+    collection,
+    query,
+    where,
+    getDoc
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 import {
@@ -49,7 +54,6 @@ let currentPath = "/";
 let allUserItems = [];
 let userItemsUnsubscribe = null;
 
-
 /****************************************************
  * 2. Authentication Module
  ****************************************************/
@@ -58,7 +62,7 @@ async function handleSignup(email, password) {
     const msgEl = getMsg();
     try {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        await setDoc(doc(db, "users", userCredential.user.uid), { items: [] });
+        await setDoc(doc(db, "users", userCredential.user.uid), { items: [], email });
         msgEl.textContent = "Account created. Logging in...";
         msgEl.className = msgGreen();
     } catch (err) {
@@ -136,7 +140,6 @@ function renderAuth(container, type) {
     };
 }
 
-
 /****************************************************
  * 3. Firestore Database Module
  ****************************************************/
@@ -144,32 +147,58 @@ function renderAuth(container, type) {
 function setupItemsSnapshot() {
     if (userItemsUnsubscribe) userItemsUnsubscribe();
     userItemsUnsubscribe = onSnapshot(doc(db, "users", currentUserId), (snap) => {
-        allUserItems = snap.exists() ? snap.data().items : [];
+        allUserItems = snap.exists() && snap.data().items ? snap.data().items : [];
         renderApp(currentPath);
     });
 }
 
 async function updateItemsInFirestore(items) {
-    await setDoc(doc(db, "users", currentUserId), { items });
+    await setDoc(doc(db, "users", currentUserId), { items }, { merge: true });
 }
 
+/****************************************************
+ * Helpers: unique name generation
+ ****************************************************/
+
+function splitNameExt(filename) {
+    const idx = filename.lastIndexOf(".");
+    if (idx === -1) return [filename, ""];
+    return [filename.slice(0, idx), filename.slice(idx)];
+}
+
+function makeNameWithSuffix(base, ext, n) {
+    return `${base} (${n})${ext}`;
+}
+
+function generateUniqueNameFor(items, desiredName, path) {
+    const [base, ext] = splitNameExt(desiredName);
+    let n = 1;
+    let candidate = desiredName;
+    const exists = (name) => items.some(i => i.name === name && i.path === path);
+    while (exists(candidate)) {
+        n++;
+        candidate = makeNameWithSuffix(base, ext, n);
+    }
+    return candidate;
+}
 
 /****************************************************
- * 4. Storage (Upload / Delete / Download)
+ * 4. Storage (Upload / Delete / Download) + Share
  ****************************************************/
 
 async function handleUploadFile(file) {
     const msg = getMsg();
 
-    if (existsInCurrentFolder(file.name)) {
-        return showCustomAlert(`"${file.name}" already exists.`);
+    let fileName = file.name;
+    if (existsInCurrentFolder(fileName)) {
+        fileName = generateUniqueNameFor(allUserItems, fileName, currentPath);
     }
 
-    msg.textContent = `Uploading "${file.name}"...`;
+    msg.textContent = `Uploading "${fileName}"...`;
     msg.className = msgBlue();
 
     try {
-        const storagePath = `users/${currentUserId}${currentPath}${file.name}`;
+        const storagePath = `users/${currentUserId}${currentPath}${fileName}`;
         const uploadRef = ref(storage, storagePath);
 
         const uploaded = await uploadBytes(uploadRef, file);
@@ -177,7 +206,7 @@ async function handleUploadFile(file) {
 
         allUserItems.push({
             type: "file",
-            name: file.name,
+            name: fileName,
             path: currentPath,
             size: (file.size / 1024).toFixed(2) + " KB",
             date: Date.now(),
@@ -187,7 +216,7 @@ async function handleUploadFile(file) {
 
         await updateItemsInFirestore(allUserItems);
 
-        msg.textContent = `Uploaded "${file.name}".`;
+        msg.textContent = `Uploaded "${fileName}".`;
         msg.className = msgGreen();
     } catch (err) {
         showCustomAlert("Upload failed.");
@@ -224,7 +253,6 @@ async function handleCreateFolder(folderName) {
     msg.textContent = `Folder "${name}" created successfully.`;
     msg.className = msgGreen();
 }
-
 
 async function downloadFile(name) {
     const file = findItem(name);
@@ -276,9 +304,66 @@ function handleDeleteFile(name, isFolder) {
     );
 }
 
+/****************************************************
+ * 4b. Share (Option A: copy metadata into recipient's items)
+ ****************************************************/
+
+window.shareItem = async function (name) {
+    const item = allUserItems.find(i => i.name === name && i.path === currentPath && i.type === "file");
+    if (!item) return showCustomAlert("File not found.");
+
+    const email = prompt("Enter recipient's email:");
+    if (!email) return;
+
+    try {
+        const q = query(collection(db, "users"), where("email", "==", email));
+        const snaps = await getDocs(q);
+
+        if (snaps.empty) {
+            return showCustomAlert("User not found.");
+        }
+
+        const recipientDoc = snaps.docs[0];
+        const recipientId = recipientDoc.id;
+        const recipientData = recipientDoc.data();
+        const recipientItems = Array.isArray(recipientData.items) ? [...recipientData.items] : [];
+
+        let copyName = item.name;
+        const existsInRecipient = (n) => recipientItems.some(i => i.name === n && i.path === "/");
+        if (existsInRecipient(copyName)) {
+            const [base, ext] = splitNameExt(copyName);
+            let n = 1;
+            let candidate = copyName;
+            while (existsInRecipient(candidate)) {
+                n++;
+                candidate = makeNameWithSuffix(base, ext, n);
+            }
+            copyName = candidate;
+        }
+
+        const copyMeta = {
+            type: "file",
+            name: copyName,
+            path: "/", 
+            size: item.size || "",
+            date: Date.now(),
+            storagePath: item.storagePath,
+            downloadURL: item.downloadURL
+        };
+
+        recipientItems.push(copyMeta);
+
+        await setDoc(doc(db, "users", recipientId), { items: recipientItems }, { merge: true });
+
+        showCustomAlert(`Shared "${item.name}" with ${email}.`);
+    } catch (err) {
+        console.error(err);
+        showCustomAlert("Error while sharing file.");
+    }
+};
 
 /****************************************************
- * 5. UI Rendering Module
+ * 5. UI Rendering Module (updated to include Share + Rename + tooltip)
  ****************************************************/
 
 function renderApp(path = "/") {
@@ -302,8 +387,8 @@ function renderFileManager(container) {
     <h2 class="text-2xl font-semibold">Hello, ${userEmail}!</h2>
 
     <button onclick="toggleSettingsMenu()" 
-        class="text-sm text-gray-700 border px-3 py-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-200">
-        Settings ⚙️
+            class="text-gray-700 dark:text-gray-200 border px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-2xl leading-none">
+            ⚙️
     </button>
 </div>
 
@@ -312,7 +397,7 @@ function renderFileManager(container) {
 
     <button onclick="toggleDarkMode()" 
         class="w-full text-left py-2 px-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-200">
-        🌙 Dark Mode
+        🌙 Dark Mode/☀️ Light Mode
     </button>
 
     <button onclick="handleLogout()" 
@@ -348,7 +433,7 @@ function renderBreadcrumbs() {
     let crumbs = `<div class="mb-4 p-2 bg-white border rounded shadow-sm flex justify-between">
         <div class="text-sm">`;
 
-    crumbs += `<a href="#" onclick="renderApp('/')">Main</a>`;
+    crumbs += `<a href="#" onclick="renderApp('/')">Home</a>`;
 
     for (let folder of parts) {
         path += folder + "/";
@@ -358,7 +443,7 @@ function renderBreadcrumbs() {
     crumbs += `</div>`;
 
     if (currentPath !== "/") {
-        crumbs += `<button onclick="goUpDirectory()" class="text-indigo-600">Up</button>`;
+        crumbs += `<button onclick="goUpDirectory()" class="text-indigo-600"> ← </button>`;
     }
 
     return crumbs + `</div>`;
@@ -406,8 +491,13 @@ function renderListItem(item) {
     const isFolder = item.type === "folder";
     const icon = isFolder ? "📁" : "📄";
 
+    const size = item.size || "";
+    const dateStr = item.date ? (new Date(item.date)).toLocaleString() : "";
+    const tooltip = `Size: ${size}\nUploaded: ${dateStr}\nPath: ${item.path}`;
+
     return `
         <li class="flex justify-between py-3 border-b cursor-pointer"
+            title="${escapeHtml(tooltip)}"
             onclick="${isFolder
                 ? `renderApp('${currentPath}${item.name}/')`
                 : `downloadFile('${item.name}')`}">
@@ -415,14 +505,125 @@ function renderListItem(item) {
             <div>
                 ${icon} ${item.name}
                 <div class="text-xs text-gray-500">
-                    ${isFolder ? "Folder" : item.size}
+                    ${isFolder ? "Folder" : size}
                 </div>
             </div>
 
-            <button onclick="event.stopPropagation(); handleDeleteFile('${item.name}', ${isFolder})"
-                class="text-red-600">Delete</button>
+            <div class="space-x-3">
+${
+    isFolder
+        ? `<button onclick="event.stopPropagation(); window.shareFolder('${item.name}')" class="text-indigo-600">Share</button>`
+        : `<button onclick="event.stopPropagation(); window.shareItem('${item.name}')" class="text-indigo-600">Share</button>`
+}
+                <button onclick="event.stopPropagation(); window.renameItem('${item.name}')" class="text-yellow-600">Rename</button>
+                <button onclick="event.stopPropagation(); handleDeleteFile('${item.name}', ${isFolder})"
+                    class="text-red-600">Delete</button>
+            </div>
         </li>
     `;
+}
+
+/****************************************************
+ * Share Folder (recursive copy of all contents)
+ ****************************************************/
+window.shareFolder = async function (folderName) {
+
+    const basePath = currentPath + folderName + "/";
+
+    const email = prompt(`Share folder "${folderName}" with:\nEnter email:`);
+
+    if (!email) return;
+
+    try {
+        const q = query(collection(db, "users"), where("email", "==", email));
+        const snaps = await getDocs(q);
+
+        if (snaps.empty) return showCustomAlert("User not found.");
+
+        const recipientDoc = snaps.docs[0];
+        const recipientId = recipientDoc.id;
+        const recipientData = recipientDoc.data();
+        const recipientItems = Array.isArray(recipientData.items) ? [...recipientData.items] : [];
+
+        const itemsToCopy = allUserItems.filter(i =>
+            (i.path + i.name + (i.type === "folder" ? "/" : "")).startsWith(basePath)
+        );
+
+        let uniqueRoot = folderName;
+        const existsInRecipientRoot = (n) =>
+            recipientItems.some(i => i.name === n && i.path === "/");
+
+        if (existsInRecipientRoot(uniqueRoot)) {
+            const [b, e] = splitNameExt(uniqueRoot);
+            let n = 1;
+            let candidate = uniqueRoot;
+            while (existsInRecipientRoot(candidate)) {
+                n++;
+                candidate = `${b} (${n})`;
+            }
+            uniqueRoot = candidate;
+        }
+
+        for (let item of itemsToCopy) {
+            const originalFull = item.path + item.name + (item.type === "folder" ? "/" : "");
+
+const itemFull = item.path + item.name + (item.type === "folder" ? "/" : "");
+
+let relative = itemFull.substring(basePath.length);
+
+if (relative === "") {
+    relative = item.name + "/"; 
+}
+
+let relativeFolderPath = relative.split("/").slice(0, -1).join("/");
+
+let newPath = "/";
+if (relativeFolderPath.trim() !== "") {
+    newPath = `/${uniqueRoot}/${relativeFolderPath}/`;
+} else {
+    newPath = `/${uniqueRoot}/`;
+}
+
+
+            let newName = item.name;
+
+            if (item.type === "file") {
+                let conflict = recipientItems.some(x => x.name === newName && x.path === newPath);
+                if (conflict) {
+                    const [b, e] = splitNameExt(newName);
+                    let n = 1;
+                    let candidate = newName;
+                    while (recipientItems.some(x => x.name === candidate && x.path === newPath)) {
+                        n++;
+                        candidate = `${b} (${n})${e}`;
+                    }
+                    newName = candidate;
+                }
+            }
+
+            recipientItems.push({
+                type: item.type,
+                name: newName,
+                path: newPath,
+                size: item.size || "",
+                date: Date.now(),
+                storagePath: item.storagePath || null,
+                downloadURL: item.downloadURL || null
+            });
+        }
+
+        await setDoc(doc(db, "users", recipientId), { items: recipientItems }, { merge: true });
+
+        showCustomAlert(`Successfully shared folder "${folderName}" to ${email}.`);
+
+    } catch (err) {
+        console.error(err);
+        showCustomAlert("Error sharing folder.");
+    }
+};
+
+function escapeHtml(str = "") {
+    return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function getCurrentFolderItems() {
@@ -432,28 +633,27 @@ function getCurrentFolderItems() {
     for (let item of allUserItems) {
         const full = item.path + item.name + (item.type === "folder" ? "/" : "");
 
-if (full.startsWith(currentPath)) {
-    let relative = full.slice(currentPath.length);
+        if (full.startsWith(currentPath)) {
+            let relative = full.slice(currentPath.length);
 
-    if (!relative || relative === "/") continue;
+            if (!relative || relative === "/") continue;
 
-    if (relative.endsWith("/")) relative = relative.slice(0, -1);
+            if (relative.endsWith("/")) relative = relative.slice(0, -1);
 
-    const slash = relative.indexOf("/");
-    const name = slash === -1 ? relative : relative.slice(0, slash);
+            const slash = relative.indexOf("/");
+            const name = slash === -1 ? relative : relative.slice(0, slash);
 
-    if (!name.trim()) continue;
+            if (!name.trim()) continue;
 
-    if (!seen.has(name)) {
-        seen.add(name);
-        results.push({
-            type: slash === -1 ? item.type : "folder",
-            name,
-            size: item.size || ""
-        });
-    }
-}
-
+            if (!seen.has(name)) {
+                seen.add(name);
+                results.push({
+                    type: slash === -1 ? item.type : "folder",
+                    name,
+                    size: item.size || ""
+                });
+            }
+        }
     }
 
     return results.sort((a, b) => a.name.localeCompare(b.name));
@@ -465,22 +665,47 @@ window.goUpDirectory = function () {
     renderApp(trimmed.substring(0, trimmed.lastIndexOf("/") + 1));
 };
 
+/****************************************************
+ * 6. Rename / Edit implementation
+ ****************************************************/
+
+window.renameItem = async function (oldName) {
+    const newName = prompt("Enter new name:", oldName);
+    if (!newName || !newName.trim()) return;
+    const trimmed = newName.trim();
+
+    if (existsInCurrentFolder(trimmed)) {
+        return showCustomAlert(`An item named "${trimmed}" already exists here.`);
+    }
+
+    let updated = false;
+    allUserItems = allUserItems.map(i => {
+        if (i.path === currentPath && i.name === oldName) {
+            updated = true;
+            return { ...i, name: trimmed, date: Date.now() }; 
+        }
+        return i;
+    });
+
+    if (!updated) return showCustomAlert("Item not found.");
+
+    await updateItemsInFirestore(allUserItems);
+};
 
 /****************************************************
- * 6. Modals & Alerts
+ * 7. Modals & Alerts
  ****************************************************/
 
 function showCustomAlert(msg) {
-    alert(msg); // You can keep your modal here
+    alert(msg);
 }
 
 function showCustomConfirm(msg, onConfirm) {
     if (confirm(msg)) onConfirm();
 }
 
-
 /****************************************************
- * 7. Auto Logout Timer
+ * 8. Auto Logout Timer
  ****************************************************/
 
 let inactivityTimer = null;
@@ -497,9 +722,8 @@ function resetInactivityTimer() {
     window.addEventListener(ev, resetInactivityTimer);
 });
 
-
 /****************************************************
- * 8. Utility Helpers
+ * 9. Utility Helpers
  ****************************************************/
 
 function findItem(name) {
@@ -524,7 +748,6 @@ function enableAuthBtn(text) {
     btn.textContent = text;
 }
 
-
 /****************************************************
  * Dark Mode Support
  ****************************************************/
@@ -542,7 +765,6 @@ window.toggleDarkMode = function () {
     }
 })();
 
-
 /****************************************************
  * Settings Menu Controls
  ****************************************************/
@@ -556,13 +778,11 @@ document.addEventListener("click", (e) => {
     const menu = document.getElementById("settingsMenu");
     if (!menu) return;
 
-    if (!menu.contains(e.target) && 
+    if (!menu.contains(e.target) &&
         !e.target.matches("button[onclick='toggleSettingsMenu()']")) {
         menu.classList.add("hidden");
     }
 });
-
-
 
 /****************************************************
  * 9. Window Exports
@@ -573,14 +793,20 @@ window.handleDeleteFile = handleDeleteFile;
 window.downloadFile = downloadFile;
 window.renderApp = renderApp;
 
-
-
 /****************************************************
  * 10. Startup
  ****************************************************/
 
-onAuthStateChanged(auth, (user) => {
+onAuthStateChanged(auth, async (user) => {
     currentUserId = user ? user.uid : null;
-    if (user) setupItemsSnapshot();
+    if (user) {
+        // ensure the user's email is saved in Firestore for share lookups
+        try {
+            await setDoc(doc(db, "users", user.uid), { email: user.email }, { merge: true });
+        } catch (e) {
+            console.warn("Could not set user email in Firestore:", e);
+        }
+        setupItemsSnapshot();
+    }
     renderApp("/");
 });
