@@ -1,38 +1,46 @@
 /****************************************************
- * 1. Firebase Initialization
+ * MainJS.js (fixed)
  ****************************************************/
 
-import {
-    initializeApp
-} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+/****************************************************
+ * 1. Firebase Initialization
+ ****************************************************/
+import { showShareNotification } from "./notifications.js";
+import { t, setLanguage, getLanguage, LANGUAGES } from "./languages.js";
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 
 import {
-    getAuth,
-    onAuthStateChanged,
-    createUserWithEmailAndPassword,
-    signInWithEmailAndPassword,
-    signOut
+  getAuth,
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
 import {
-    getFirestore,
-    doc,
-    setDoc,
-    onSnapshot,
-    getDocs,
-    collection,
-    query,
-    where,
-    getDoc
+  getFirestore,
+  doc,
+  setDoc,
+  onSnapshot,
+  getDocs,
+  collection,
+  query,
+  where,
+  getDoc
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 import {
-    getStorage,
-    ref,
-    uploadBytes,
-    getDownloadURL,
-    deleteObject
+  getStorage,
+  ref,
+  uploadBytesResumable,
+  getDownloadURL,
+  deleteObject
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+
+// constants
+const FREE_STORAGE_BYTES = 20 * 1024 * 1024 * 1024;   // 20GB
+const PREMIUM_STORAGE_BYTES = 100 * 1024 * 1024 * 1024; // 100GB
 
 const firebaseConfig = {
     apiKey: "AIzaSyDGJvoy39QvQpjkQsDf6Y5uHEN1GqzeMY0",
@@ -53,6 +61,9 @@ let currentUserId = null;
 let currentPath = "/";
 let allUserItems = [];
 let userItemsUnsubscribe = null;
+
+/* migration guard to avoid snapshot loop */
+let isMigrating = false;
 
 /****************************************************
  * 2. Authentication Module
@@ -144,20 +155,60 @@ function renderAuth(container, type) {
  * 3. Firestore Database Module
  ****************************************************/
 
+let previousItems = [];
+let lastChecked = Number(localStorage.getItem("lastChecked")) || 0;
+
 function setupItemsSnapshot() {
     if (userItemsUnsubscribe) userItemsUnsubscribe();
-    userItemsUnsubscribe = onSnapshot(doc(db, "users", currentUserId), (snap) => {
-        allUserItems = snap.exists() && snap.data().items ? snap.data().items : [];
+
+    userItemsUnsubscribe = onSnapshot(doc(db, "users", currentUserId), async (snap) => {
+
+        const newItems = snap.exists() && snap.data().items ? snap.data().items : [];
+
+        // detect shared notifications (new or missed while offline)
+        newItems.forEach(item => {
+            const isShared = item.sharedBy && item.sharedBy !== (auth && auth.currentUser ? auth.currentUser.email : null);
+
+            if (!isShared) return;
+
+            const alreadyHad = previousItems.some(i =>
+                i.name === item.name &&
+                i.path === item.path
+            );
+
+            const isNewRealtime = !alreadyHad;
+            const isNewAfterLogin = item.sharedAt && item.sharedAt > lastChecked;
+
+            if (isNewRealtime || isNewAfterLogin) {
+                showShareNotification(item.name, item.sharedBy);
+            }
+        });
+
+        previousItems = newItems;
+        lastChecked = Date.now();
+        localStorage.setItem("lastChecked", lastChecked);
+
+        allUserItems = newItems;
+
+        // attempt a safe migration of old size strings to bytes (one-time)
+        if (!isMigrating) {
+            await migrateOldSizes();
+        }
+
+        // ensure UI storage display updates
         renderApp(currentPath);
+        updateStorageDisplay();
     });
 }
 
 async function updateItemsInFirestore(items) {
     await setDoc(doc(db, "users", currentUserId), { items }, { merge: true });
+    // update storage UI after write
+    updateStorageDisplay();
 }
 
 /****************************************************
- * Helpers: unique name generation
+ * Helpers: unique name generation & size parsing
  ****************************************************/
 
 function splitNameExt(filename) {
@@ -182,6 +233,60 @@ function generateUniqueNameFor(items, desiredName, path) {
     return candidate;
 }
 
+// parse old size strings like "123.45 KB" or "1.23 MB"
+function convertSizeStringToBytes(sizeStr) {
+    if (!sizeStr || typeof sizeStr !== "string") return 0;
+    const m = sizeStr.trim().match(/^([\d.,]+)\s*(B|KB|MB|GB)?$/i);
+    if (!m) return 0;
+    const num = parseFloat(m[1].replace(/,/g, ""));
+    const unit = (m[2] || "").toUpperCase();
+    if (isNaN(num)) return 0;
+    switch (unit) {
+        case "GB": return Math.round(num * 1024 * 1024 * 1024);
+        case "MB": return Math.round(num * 1024 * 1024);
+        case "KB": return Math.round(num * 1024);
+        default: return Math.round(num);
+    }
+}
+
+/* Run a one-time migration when snapshot first loads:
+   - finds items that have `size` but missing `sizeBytes`
+   - converts and writes back a single time
+   - protects against snapshot recursion with isMigrating flag
+*/
+async function migrateOldSizes() {
+    if (!Array.isArray(allUserItems) || allUserItems.length === 0) return;
+
+    const toUpdate = [];
+    let changed = false;
+
+    for (let it of allUserItems) {
+        if (it.type === "file" && (it.sizeBytes === undefined || it.sizeBytes === null)) {
+            // try to compute sizeBytes from possible fields
+            const bytesFromSize = convertSizeStringToBytes(it.size);
+            if (bytesFromSize > 0) {
+                it.sizeBytes = bytesFromSize;
+                changed = true;
+            } else if (it.sizeBytes === undefined && typeof it.sizeBytes !== "number") {
+                // leave as null if nothing found
+                it.sizeBytes = null;
+            }
+        }
+    }
+
+    if (changed) {
+        try {
+            isMigrating = true;
+            await updateItemsInFirestore(allUserItems);
+            // allow snapshot to settle
+            setTimeout(() => { isMigrating = false; }, 800);
+        } catch (e) {
+            console.warn("Migration write failed:", e);
+            isMigrating = false;
+        }
+    }
+}
+
 /****************************************************
  * 4. Storage (Upload / Delete / Download) + Share
  ****************************************************/
@@ -194,31 +299,59 @@ async function handleUploadFile(file) {
         fileName = generateUniqueNameFor(allUserItems, fileName, currentPath);
     }
 
-    msg.textContent = `Uploading "${fileName}"...`;
+    const currentUsed = calculateTotalStorageUsed();
+    const newFileSize = file.size; 
+
+    if (currentUsed + newFileSize > FREE_STORAGE_BYTES) {
+        showCustomAlert("You have reached your 20GB storage limit.\nSubscribe to get 100GB.");
+        return;
+    }
+
+    msg.textContent = t("uploadMsg", fileName);
     msg.className = msgBlue();
 
     try {
         const storagePath = `users/${currentUserId}${currentPath}${fileName}`;
         const uploadRef = ref(storage, storagePath);
 
-        const uploaded = await uploadBytes(uploadRef, file);
-        const url = await getDownloadURL(uploaded.ref);
+        const uploadTask = uploadBytesResumable(uploadRef, file);
 
-        allUserItems.push({
-            type: "file",
-            name: fileName,
-            path: currentPath,
-            size: (file.size / 1024).toFixed(2) + " KB",
-            date: Date.now(),
-            storagePath,
-            downloadURL: url
-        });
+        msg.textContent = `Uploading "${fileName}"... 0%`;
+        msg.className = msgBlue();
 
-        await updateItemsInFirestore(allUserItems);
+        uploadTask.on("state_changed",
+            (snapshot) => {
+                const progress = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+                msg.textContent = `Uploading "${fileName}"... ${progress}%`;
+            },
+            (error) => {
+                console.error("Upload error:", error);
+                showCustomAlert("Upload failed.");
+            },
+            async () => {
+                const url = await getDownloadURL(uploadTask.snapshot.ref);
 
-        msg.textContent = `Uploaded "${fileName}".`;
-        msg.className = msgGreen();
+                allUserItems.push({
+                    type: "file",
+                    name: fileName,
+                    path: currentPath,
+                    sizeBytes: file.size, 
+                    date: Date.now(),
+                    storagePath,
+                    downloadURL: url,
+                    uploaderEmail: auth && auth.currentUser ? auth.currentUser.email : null
+                });
+
+                await updateItemsInFirestore(allUserItems);
+
+                msg.textContent = t("uploadedMsg", fileName);
+                msg.className = msgGreen();
+
+                updateStorageDisplay();
+            }
+        );
     } catch (err) {
+        console.error("Upload catch error:", err);
         showCustomAlert("Upload failed.");
     }
 }
@@ -250,8 +383,10 @@ async function handleCreateFolder(folderName) {
     allUserItems.push(folder);
     await updateItemsInFirestore(allUserItems);
 
-    msg.textContent = `Folder "${name}" created successfully.`;
+    msg.textContent = t("createFolderMsg", name);
     msg.className = msgGreen();
+
+    updateStorageDisplay();
 }
 
 async function downloadFile(name) {
@@ -300,12 +435,13 @@ function handleDeleteFile(name, isFolder) {
             }
 
             await updateItemsInFirestore(allUserItems);
+            updateStorageDisplay();
         }
     );
 }
 
 /****************************************************
- * 4b. Share (Option A: copy metadata into recipient's items)
+ * 4b. Share (copy metadata into recipient's items)
  ****************************************************/
 
 window.shareItem = async function (name) {
@@ -341,14 +477,20 @@ window.shareItem = async function (name) {
             copyName = candidate;
         }
 
+        const sizeBytesForRecipient = item.sizeBytes || convertSizeStringToBytes(item.size) || 0;
+
         const copyMeta = {
             type: "file",
             name: copyName,
-            path: "/", 
+            path: "/",
             size: item.size || "",
+            sizeBytes: sizeBytesForRecipient,
             date: Date.now(),
             storagePath: item.storagePath,
-            downloadURL: item.downloadURL
+            downloadURL: item.downloadURL,
+
+            sharedBy: auth.currentUser ? auth.currentUser.email : "unknown",
+            sharedAt: Date.now()
         };
 
         recipientItems.push(copyMeta);
@@ -363,7 +505,7 @@ window.shareItem = async function (name) {
 };
 
 /****************************************************
- * 5. UI Rendering Module (updated to include Share + Rename + tooltip)
+ * 5. UI Rendering Module (Share + Rename + tooltip)
  ****************************************************/
 
 function renderApp(path = "/") {
@@ -378,53 +520,108 @@ function renderApp(path = "/") {
 
 function renderFileManager(container) {
 
-    const userEmail = auth.currentUser.email;
+    const userEmail = auth.currentUser ? auth.currentUser.email : "";
 
     container.innerHTML = `
         <div id="file-manager-card">
 
-<div class="mb-8 flex justify-between">
-    <h2 class="text-2xl font-semibold">Hello, ${userEmail}!</h2>
+            <!-- Top Bar -->
+            <div class="mb-8 flex justify-between items-start">
 
-    <button onclick="toggleSettingsMenu()" 
-            class="text-gray-700 dark:text-gray-200 border px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-2xl leading-none">
-            ⚙️
-    </button>
-</div>
+                <div>
+                    <h2 class="text-2xl font-semibold">
+                        ${t("hello")} ${userEmail}!
+                    </h2>
 
-<div id="settingsMenu" 
-    class="hidden bg-white dark:bg-gray-800 border rounded-lg p-4 shadow-lg absolute right-6 top-20 w-48">
+                    <p class="text-sm text-gray-600 dark:text-gray-300 mt-1" id="storageDisplay"></p>
+                    <p class="text-xs text-red-500 cursor-pointer hover:underline"
+                       onclick="alert('Subscription system coming soon!')">
+                       Upgrade to 100GB
+                    </p>
+                </div>
 
-    <button onclick="toggleDarkMode()" 
-        class="w-full text-left py-2 px-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-200">
-        🌙 Dark Mode/☀️ Light Mode
-    </button>
+                <!-- Settings Button + Dropdown -->
+                <div class="relative">
+                    <button 
+                        onclick="toggleSettingsMenu()" 
+                        class="text-gray-700 dark:text-gray-200 border px-3 py-2 rounded-lg 
+                               hover:bg-gray-100 dark:hover:bg-gray-700 text-2xl leading-none">
+                        ⚙️
+                    </button>
 
-    <button onclick="handleLogout()" 
-        class="w-full text-left py-2 px-2 rounded text-red-600 hover:bg-red-100 dark:hover:bg-red-900">
-        Logout
-    </button>
-</div>
+                    <div id="settingsMenu" 
+                        class="hidden absolute right-0 mt-2 bg-white dark:bg-gray-800 border 
+                               rounded-lg p-4 shadow-lg w-56 z-50">
 
+                        <label class="block mb-2 text-gray-900 dark:text-gray-200 font-semibold">
+                            ${t("language")}
+                        </label>
+
+                        <select id="languageSelect" 
+                            class="w-full mb-3 p-2 rounded border bg-white text-gray-900 
+                                   dark:bg-gray-700 dark:text-white">
+                        </select>
+
+                        <button onclick="toggleDarkMode()" 
+                            class="w-full text-left py-2 px-2 rounded hover:bg-gray-100 
+                                   dark:hover:bg-gray-700 text-gray-900 dark:text-gray-200">
+                            ${t("darkMode")}
+                        </button>
+
+                        <button onclick="handleLogout()" 
+                            class="w-full text-left py-2 px-2 rounded text-red-600 
+                                   hover:bg-red-100 dark:hover:bg-red-900">
+                            ${t("logout")}
+                        </button>
+
+                    </div>
+                </div>
+            </div>
 
             ${renderBreadcrumbs()}
             ${renderActions()}
             ${renderItems()}
+
         </div>
     `;
 
-    document.getElementById("uploadForm").onsubmit = (e) => {
-        e.preventDefault();
-        const file = document.getElementById("fileInput").files[0];
-        if (file) handleUploadFile(file);
-    };
+    setTimeout(() => {
+        const select = document.getElementById("languageSelect");
+        if (select) {
+            select.innerHTML = Object.keys(LANGUAGES)
+                .map(code => `<option value="${code}">${code.toUpperCase()}</option>`)
+                .join("");
 
-    document.getElementById("createFolderForm").onsubmit = (e) => {
-        e.preventDefault();
-        handleCreateFolder(e.target.folderName.value.trim());
-        e.target.reset();
-    };
+            select.value = getLanguage();
+
+            select.onchange = () => {
+                setLanguage(select.value);
+                renderApp(currentPath);
+            };
+        }
+
+        updateStorageDisplay();
+    }, 50);
+
+    const uploadForm = document.getElementById("uploadForm");
+    if (uploadForm) {
+        uploadForm.onsubmit = (e) => {
+            e.preventDefault();
+            const file = document.getElementById("fileInput").files[0];
+            if (file) handleUploadFile(file);
+        };
+    }
+
+    const createForm = document.getElementById("createFolderForm");
+    if (createForm) {
+        createForm.onsubmit = (e) => {
+            e.preventDefault();
+            handleCreateFolder(e.target.folderName.value.trim());
+            e.target.reset();
+        };
+    }
 }
+
 
 function renderBreadcrumbs() {
     const parts = currentPath.split("/").filter(Boolean);
@@ -453,7 +650,7 @@ function renderActions() {
     return `
         <div class="flex space-x-4 mb-8">
             <div class="card flex-1">
-                <h3 class="text-lg mb-3">Create Folder</h3>
+                <h3 class="text-lg mb-3">${t("createFolder")}</h3>
                 <form id="createFolderForm" class="flex space-x-3">
                     <input name="folderName" class="input-field flex-grow" required>
                     <button class="btn-primary w-1/3">Create</button>
@@ -461,7 +658,7 @@ function renderActions() {
             </div>
 
             <div class="card flex-1">
-                <h3 class="text-lg mb-3">Upload File</h3>
+                <h3 class="text-lg mb-3">${t("uploadFile")}</h3>
                 <form id="uploadForm" class="flex space-x-3">
                     <input id="fileInput" type="file" class="input-field flex-grow" required>
                     <button class="btn-primary w-1/3">Upload</button>
@@ -477,11 +674,11 @@ function renderItems() {
     const items = getCurrentFolderItems();
     const list = items.length ?
         items.map(i => renderListItem(i)).join("") :
-        `<li class="py-4 text-center text-gray-500">Empty folder.</li>`;
+        `<li class="py-4 text-center text-gray-500">${t("emptyFolder")}</li>`;
 
     return `
         <div class="card">
-            <h3 class="text-xl mb-4">Files & Folders (${items.length})</h3>
+            <h3 class="text-xl mb-4">${t("filesFolders")} (${items.length})</h3>
             <ul>${list}</ul>
         </div>
     `;
@@ -491,12 +688,28 @@ function renderListItem(item) {
     const isFolder = item.type === "folder";
     const icon = isFolder ? "📁" : "📄";
 
-    const size = item.size || "";
+    let displaySize = "";
+    if (!isFolder) {
+        if (item.sizeBytes || item.sizeBytes === 0) {
+            displaySize = formatFileSize(item.sizeBytes);
+        } else if (item.size) {
+            displaySize = item.size;
+        }
+    }
+
     const dateStr = item.date ? (new Date(item.date)).toLocaleString() : "";
-    const tooltip = `Size: ${size}\nUploaded: ${dateStr}\nPath: ${item.path}`;
+    let ownerInfo = "Uploaded by you";
+
+    if (item.sharedBy) {
+        ownerInfo = `Shared by ${item.sharedBy}`;
+    } else if (item.uploaderEmail && item.uploaderEmail !== (auth && auth.currentUser ? auth.currentUser.email : null)) {
+        ownerInfo = `Uploaded by ${item.uploaderEmail}`;
+    }
+
+    const tooltip = `Size: ${displaySize || "—"}\n${ownerInfo}\nUploaded: ${dateStr}\nPath: ${item.path}`;
 
     return `
-        <li class="flex justify-between py-3 border-b cursor-pointer"
+        <li class="flex justify-between py-3 border-b cursor-pointer file-item"
             title="${escapeHtml(tooltip)}"
             onclick="${isFolder
                 ? `renderApp('${currentPath}${item.name}/')`
@@ -505,7 +718,7 @@ function renderListItem(item) {
             <div>
                 ${icon} ${item.name}
                 <div class="text-xs text-gray-500">
-                    ${isFolder ? "Folder" : size}
+                    ${isFolder ? "Folder" : displaySize}
                 </div>
             </div>
 
@@ -565,25 +778,22 @@ window.shareFolder = async function (folderName) {
         }
 
         for (let item of itemsToCopy) {
-            const originalFull = item.path + item.name + (item.type === "folder" ? "/" : "");
+            const itemFull = item.path + item.name + (item.type === "folder" ? "/" : "");
 
-const itemFull = item.path + item.name + (item.type === "folder" ? "/" : "");
+            let relative = itemFull.substring(basePath.length);
 
-let relative = itemFull.substring(basePath.length);
+            if (relative === "") {
+                relative = item.name + "/";
+            }
 
-if (relative === "") {
-    relative = item.name + "/"; 
-}
+            let relativeFolderPath = relative.split("/").slice(0, -1).join("/");
 
-let relativeFolderPath = relative.split("/").slice(0, -1).join("/");
-
-let newPath = "/";
-if (relativeFolderPath.trim() !== "") {
-    newPath = `/${uniqueRoot}/${relativeFolderPath}/`;
-} else {
-    newPath = `/${uniqueRoot}/`;
-}
-
+            let newPath = "/";
+            if (relativeFolderPath.trim() !== "") {
+                newPath = `/${uniqueRoot}/${relativeFolderPath}/`;
+            } else {
+                newPath = `/${uniqueRoot}/`;
+            }
 
             let newName = item.name;
 
@@ -601,14 +811,20 @@ if (relativeFolderPath.trim() !== "") {
                 }
             }
 
+            // when copying to recipient, preserve bytes + mark sharedBy/sharedAt for files
             recipientItems.push({
                 type: item.type,
                 name: newName,
                 path: newPath,
                 size: item.size || "",
+                sizeBytes: item.sizeBytes || convertSizeStringToBytes(item.size) || null,
                 date: Date.now(),
                 storagePath: item.storagePath || null,
-                downloadURL: item.downloadURL || null
+                downloadURL: item.downloadURL || null,
+                ...(item.type === "file" ? {
+                    sharedBy: auth.currentUser ? auth.currentUser.email : "unknown",
+                    sharedAt: Date.now()
+                } : {})
             });
         }
 
@@ -650,7 +866,8 @@ function getCurrentFolderItems() {
                 results.push({
                     type: slash === -1 ? item.type : "folder",
                     name,
-                    size: item.size || ""
+                    size: item.size || "",
+                    sizeBytes: item.sizeBytes || (item.size ? convertSizeStringToBytes(item.size) : null)
                 });
             }
         }
@@ -682,7 +899,7 @@ window.renameItem = async function (oldName) {
     allUserItems = allUserItems.map(i => {
         if (i.path === currentPath && i.name === oldName) {
             updated = true;
-            return { ...i, name: trimmed, date: Date.now() }; 
+            return { ...i, name: trimmed, date: Date.now() };
         }
         return i;
     });
@@ -744,8 +961,47 @@ const msgBlue = () => "mb-4 text-sm text-center text-blue-600";
 
 function enableAuthBtn(text) {
     const btn = document.querySelector("#authForm button");
-    btn.disabled = false;
-    btn.textContent = text;
+    if (btn) {
+        btn.disabled = false;
+        btn.textContent = text;
+    }
+}
+
+function calculateTotalStorageUsed() {
+    let total = 0;
+
+    allUserItems.forEach(item => {
+        if (item.type === "file") {
+            if (typeof item.sizeBytes === "number") {
+                total += item.sizeBytes;
+            } else if (item.size) {
+                total += convertSizeStringToBytes(item.size);
+            }
+        }
+    });
+
+    return total;
+}
+
+
+function formatFileSize(bytes) {
+    if (bytes === null || bytes === undefined) return "";
+    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024*1024*1024)).toFixed(2) + " GB";
+    if (bytes >= 1024 * 1024) return (bytes / (1024*1024)).toFixed(2) + " MB";
+    if (bytes >= 1024) return (bytes / 1024).toFixed(2) + " KB";
+    return bytes + " B";
+}
+
+// updates the small text under header showing used GB
+function updateStorageDisplay() {
+    const el = document.getElementById("storageDisplay");
+    if (!el) return;
+
+    const usedBytes = calculateTotalStorageUsed();
+    const usedGB = (usedBytes / (1024*1024*1024)).toFixed(2);
+    const maxGB = (FREE_STORAGE_BYTES / (1024*1024*1024)).toFixed(0);
+
+    el.textContent = `Storage Used: ${usedGB} GB / ${maxGB} GB`;
 }
 
 /****************************************************
@@ -771,7 +1027,7 @@ window.toggleDarkMode = function () {
 
 window.toggleSettingsMenu = function () {
     const menu = document.getElementById("settingsMenu");
-    menu.classList.toggle("hidden");
+    if (menu) menu.classList.toggle("hidden");
 };
 
 document.addEventListener("click", (e) => {
@@ -779,7 +1035,7 @@ document.addEventListener("click", (e) => {
     if (!menu) return;
 
     if (!menu.contains(e.target) &&
-        !e.target.matches("button[onclick='toggleSettingsMenu()']")) {
+        !e.target.matches("button[onclick=\"toggleSettingsMenu()\"]")) {
         menu.classList.add("hidden");
     }
 });
@@ -796,17 +1052,19 @@ window.renderApp = renderApp;
 /****************************************************
  * 10. Startup
  ****************************************************/
-
 onAuthStateChanged(auth, async (user) => {
     currentUserId = user ? user.uid : null;
     if (user) {
-        // ensure the user's email is saved in Firestore for share lookups
         try {
             await setDoc(doc(db, "users", user.uid), { email: user.email }, { merge: true });
         } catch (e) {
             console.warn("Could not set user email in Firestore:", e);
         }
         setupItemsSnapshot();
+    }
+    if (user) {
+        previousItems = [];
+        lastChecked = Number(localStorage.getItem("lastChecked")) || 0;
     }
     renderApp("/");
 });
