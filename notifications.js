@@ -1,5 +1,3 @@
-// notifications.js
-
 export function showShareNotification(fileName, fromEmail) {
     const box = document.createElement("div");
 
@@ -35,13 +33,11 @@ export function showShareNotification(fileName, fromEmail) {
 
     setTimeout(() => { box.style.opacity = "1"; }, 20);
 
-    // Close when pressing X
     box.querySelector("#closeNotifBtn").onclick = () => {
         box.style.opacity = "0";
         setTimeout(() => box.remove(), 300);
     };
 
-    // Auto disappear after 5 seconds
     setTimeout(() => {
         box.style.opacity = "0";
         setTimeout(() => box.remove(), 300);

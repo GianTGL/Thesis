@@ -1,6 +1,3 @@
-/****************************************************
- * MainJS.js (fixed)
- ****************************************************/
 
 /****************************************************
  * 1. Firebase Initialization
@@ -38,7 +35,6 @@ import {
   deleteObject
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
 
-// constants
 const FREE_STORAGE_BYTES = 20 * 1024 * 1024 * 1024;   // 20GB
 const PREMIUM_STORAGE_BYTES = 100 * 1024 * 1024 * 1024; // 100GB
 
@@ -62,7 +58,6 @@ let currentPath = "/";
 let allUserItems = [];
 let userItemsUnsubscribe = null;
 
-/* migration guard to avoid snapshot loop */
 let isMigrating = false;
 
 /****************************************************
@@ -107,7 +102,7 @@ function renderAuth(container, type) {
     container.innerHTML = `
         <div id="auth-card" class="card w-full max-w-md mx-auto mt-10">
             <h2 class="text-2xl font-semibold mb-6 text-center text-indigo-600">
-                ${type === "login" ? "Welcome Back!" : "Create Account"}
+                ${type === "login" ? "Welcome" : "Create Account"}
             </h2>
 
             <div id="message" class="mb-4 text-sm text-center"></div>
@@ -165,7 +160,6 @@ function setupItemsSnapshot() {
 
         const newItems = snap.exists() && snap.data().items ? snap.data().items : [];
 
-        // detect shared notifications (new or missed while offline)
         newItems.forEach(item => {
             const isShared = item.sharedBy && item.sharedBy !== (auth && auth.currentUser ? auth.currentUser.email : null);
 
@@ -190,12 +184,10 @@ function setupItemsSnapshot() {
 
         allUserItems = newItems;
 
-        // attempt a safe migration of old size strings to bytes (one-time)
         if (!isMigrating) {
             await migrateOldSizes();
         }
 
-        // ensure UI storage display updates
         renderApp(currentPath);
         updateStorageDisplay();
     });
@@ -203,7 +195,6 @@ function setupItemsSnapshot() {
 
 async function updateItemsInFirestore(items) {
     await setDoc(doc(db, "users", currentUserId), { items }, { merge: true });
-    // update storage UI after write
     updateStorageDisplay();
 }
 
@@ -249,11 +240,7 @@ function convertSizeStringToBytes(sizeStr) {
     }
 }
 
-/* Run a one-time migration when snapshot first loads:
-   - finds items that have `size` but missing `sizeBytes`
-   - converts and writes back a single time
-   - protects against snapshot recursion with isMigrating flag
-*/
+
 async function migrateOldSizes() {
     if (!Array.isArray(allUserItems) || allUserItems.length === 0) return;
 
@@ -262,13 +249,11 @@ async function migrateOldSizes() {
 
     for (let it of allUserItems) {
         if (it.type === "file" && (it.sizeBytes === undefined || it.sizeBytes === null)) {
-            // try to compute sizeBytes from possible fields
             const bytesFromSize = convertSizeStringToBytes(it.size);
             if (bytesFromSize > 0) {
                 it.sizeBytes = bytesFromSize;
                 changed = true;
             } else if (it.sizeBytes === undefined && typeof it.sizeBytes !== "number") {
-                // leave as null if nothing found
                 it.sizeBytes = null;
             }
         }
@@ -278,7 +263,6 @@ async function migrateOldSizes() {
         try {
             isMigrating = true;
             await updateItemsInFirestore(allUserItems);
-            // allow snapshot to settle
             setTimeout(() => { isMigrating = false; }, 800);
         } catch (e) {
             console.warn("Migration write failed:", e);
@@ -441,7 +425,7 @@ function handleDeleteFile(name, isFolder) {
 }
 
 /****************************************************
- * 4b. Share (copy metadata into recipient's items)
+ Share (copy metadata into recipient's items)
  ****************************************************/
 
 window.shareItem = async function (name) {
@@ -536,7 +520,7 @@ function renderFileManager(container) {
                     <p class="text-sm text-gray-600 dark:text-gray-300 mt-1" id="storageDisplay"></p>
                     <p class="text-xs text-red-500 cursor-pointer hover:underline"
                        onclick="alert('Subscription system coming soon!')">
-                       Upgrade to 100GB
+                       ${t("upgrade")}
                     </p>
                 </div>
 
@@ -725,12 +709,12 @@ function renderListItem(item) {
             <div class="space-x-3">
 ${
     isFolder
-        ? `<button onclick="event.stopPropagation(); window.shareFolder('${item.name}')" class="text-indigo-600">Share</button>`
-        : `<button onclick="event.stopPropagation(); window.shareItem('${item.name}')" class="text-indigo-600">Share</button>`
+        ? `<button onclick="event.stopPropagation(); window.shareFolder('${item.name}')" class="text-indigo-600">${t("share")}</button>`
+        : `<button onclick="event.stopPropagation(); window.shareItem('${item.name}')" class="text-indigo-600">${t("share")}</button>`
 }
-                <button onclick="event.stopPropagation(); window.renameItem('${item.name}')" class="text-yellow-600">Rename</button>
+                <button onclick="event.stopPropagation(); window.renameItem('${item.name}')" class="text-yellow-600">${t("rename")}</button>
                 <button onclick="event.stopPropagation(); handleDeleteFile('${item.name}', ${isFolder})"
-                    class="text-red-600">Delete</button>
+                    class="text-red-600">${t("delete")}</button>
             </div>
         </li>
     `;
@@ -811,7 +795,6 @@ window.shareFolder = async function (folderName) {
                 }
             }
 
-            // when copying to recipient, preserve bytes + mark sharedBy/sharedAt for files
             recipientItems.push({
                 type: item.type,
                 name: newName,
@@ -992,7 +975,6 @@ function formatFileSize(bytes) {
     return bytes + " B";
 }
 
-// updates the small text under header showing used GB
 function updateStorageDisplay() {
     const el = document.getElementById("storageDisplay");
     if (!el) return;
@@ -1001,7 +983,7 @@ function updateStorageDisplay() {
     const usedGB = (usedBytes / (1024*1024*1024)).toFixed(2);
     const maxGB = (FREE_STORAGE_BYTES / (1024*1024*1024)).toFixed(0);
 
-    el.textContent = `Storage Used: ${usedGB} GB / ${maxGB} GB`;
+    el.textContent = `${t("storageused")} ${usedGB} GB / ${maxGB} GB`;
 }
 
 /****************************************************

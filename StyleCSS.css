@@ -95,7 +95,6 @@ html.dark .file-item {
     border-color: #333 !important;
 }
 
-/* Fix label text always stuck in dark mode */
 html:not(.dark) .text-gray-900,
 html:not(.dark) .text-gray-800,
 html:not(.dark) .text-gray-700,
