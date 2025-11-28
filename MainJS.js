@@ -1,7 +1,5 @@
 
-/****************************************************
- * 1. Firebase Initialization
- ****************************************************/
+/* 1. Firebase Initialization*/
 import { showShareNotification } from "./notifications.js";
 import { t, setLanguage, getLanguage, LANGUAGES } from "./languages.js";
 
@@ -34,9 +32,9 @@ import {
   getDownloadURL,
   deleteObject
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
-
-const FREE_STORAGE_BYTES = 20 * 1024 * 1024 * 1024;   // 20GB
-const PREMIUM_STORAGE_BYTES = 100 * 1024 * 1024 * 1024; // 100GB
+/* */
+const FREE_STORAGE_BYTES = 20 * 1024 * 1024 * 1024;  
+const PREMIUM_STORAGE_BYTES = 100 * 1024 * 1024 * 1024; 
 
 const firebaseConfig = {
     apiKey: "AIzaSyDGJvoy39QvQpjkQsDf6Y5uHEN1GqzeMY0",
@@ -60,9 +58,7 @@ let userItemsUnsubscribe = null;
 
 let isMigrating = false;
 
-/****************************************************
- * 2. Authentication Module
- ****************************************************/
+/* Auth Module */
 
 async function handleSignup(email, password) {
     const msgEl = getMsg();
@@ -146,9 +142,7 @@ function renderAuth(container, type) {
     };
 }
 
-/****************************************************
- * 3. Firestore Database Module
- ****************************************************/
+/*Firestore/Database Module*/
 
 let previousItems = [];
 let lastChecked = Number(localStorage.getItem("lastChecked")) || 0;
@@ -198,9 +192,7 @@ async function updateItemsInFirestore(items) {
     updateStorageDisplay();
 }
 
-/****************************************************
- * Helpers: unique name generation & size parsing
- ****************************************************/
+/* Renamer */
 
 function splitNameExt(filename) {
     const idx = filename.lastIndexOf(".");
@@ -224,7 +216,6 @@ function generateUniqueNameFor(items, desiredName, path) {
     return candidate;
 }
 
-// parse old size strings like "123.45 KB" or "1.23 MB"
 function convertSizeStringToBytes(sizeStr) {
     if (!sizeStr || typeof sizeStr !== "string") return 0;
     const m = sizeStr.trim().match(/^([\d.,]+)\s*(B|KB|MB|GB)?$/i);
@@ -271,9 +262,8 @@ async function migrateOldSizes() {
     }
 }
 
-/****************************************************
- * 4. Storage (Upload / Delete / Download) + Share
- ****************************************************/
+
+/* Upload */
 
 async function handleUploadFile(file) {
     const msg = getMsg();
@@ -340,6 +330,7 @@ async function handleUploadFile(file) {
     }
 }
 
+/* Folder */
 async function handleCreateFolder(folderName) {
     const name = folderName.replace(/[^a-zA-Z0-9\s-_]/g, "").trim();
     const msg = getMsg();
@@ -373,6 +364,7 @@ async function handleCreateFolder(folderName) {
     updateStorageDisplay();
 }
 
+/* Download */
 async function downloadFile(name) {
     const file = findItem(name);
 
@@ -391,6 +383,7 @@ async function downloadFile(name) {
     URL.revokeObjectURL(url);
 }
 
+/* Delete */
 function handleDeleteFile(name, isFolder) {
     showCustomConfirm(
         `Delete ${isFolder ? "this folder and everything inside it" : `"${name}"`}?`,
@@ -424,9 +417,9 @@ function handleDeleteFile(name, isFolder) {
     );
 }
 
-/****************************************************
- Share (copy metadata into recipient's items)
- ****************************************************/
+
+
+/* Share */
 
 window.shareItem = async function (name) {
     const item = allUserItems.find(i => i.name === name && i.path === currentPath && i.type === "file");
@@ -488,9 +481,8 @@ window.shareItem = async function (name) {
     }
 };
 
-/****************************************************
- * 5. UI Rendering Module (Share + Rename + tooltip)
- ****************************************************/
+
+/* Rendering */
 
 function renderApp(path = "/") {
     const app = document.getElementById("app");
@@ -720,9 +712,7 @@ ${
     `;
 }
 
-/****************************************************
- * Share Folder (recursive copy of all contents)
- ****************************************************/
+/* Share Folder */
 window.shareFolder = async function (folderName) {
 
     const basePath = currentPath + folderName + "/";
@@ -865,10 +855,7 @@ window.goUpDirectory = function () {
     renderApp(trimmed.substring(0, trimmed.lastIndexOf("/") + 1));
 };
 
-/****************************************************
- * 6. Rename / Edit implementation
- ****************************************************/
-
+/* Rename */
 window.renameItem = async function (oldName) {
     const newName = prompt("Enter new name:", oldName);
     if (!newName || !newName.trim()) return;
@@ -892,10 +879,7 @@ window.renameItem = async function (oldName) {
     await updateItemsInFirestore(allUserItems);
 };
 
-/****************************************************
- * 7. Modals & Alerts
- ****************************************************/
-
+/* Alerts */
 function showCustomAlert(msg) {
     alert(msg);
 }
@@ -904,9 +888,8 @@ function showCustomConfirm(msg, onConfirm) {
     if (confirm(msg)) onConfirm();
 }
 
-/****************************************************
- * 8. Auto Logout Timer
- ****************************************************/
+
+/* 5 minute timer */
 
 let inactivityTimer = null;
 const LOGOUT_TIME_MS = 5 * 60 * 1000;
@@ -922,10 +905,8 @@ function resetInactivityTimer() {
     window.addEventListener(ev, resetInactivityTimer);
 });
 
-/****************************************************
- * 9. Utility Helpers
- ****************************************************/
 
+/* Upload */
 function findItem(name) {
     return allUserItems.find(i => i.name === name && i.path === currentPath);
 }
@@ -986,9 +967,7 @@ function updateStorageDisplay() {
     el.textContent = `${t("storageused")} ${usedGB} GB / ${maxGB} GB`;
 }
 
-/****************************************************
- * Dark Mode Support
- ****************************************************/
+/* Dark Mode */
 
 window.toggleDarkMode = function () {
     document.documentElement.classList.toggle("dark");
@@ -1003,10 +982,7 @@ window.toggleDarkMode = function () {
     }
 })();
 
-/****************************************************
- * Settings Menu Controls
- ****************************************************/
-
+/* Settings */
 window.toggleSettingsMenu = function () {
     const menu = document.getElementById("settingsMenu");
     if (menu) menu.classList.toggle("hidden");
@@ -1022,18 +998,12 @@ document.addEventListener("click", (e) => {
     }
 });
 
-/****************************************************
- * 9. Window Exports
- ****************************************************/
-
 window.handleLogout = handleLogout;
 window.handleDeleteFile = handleDeleteFile;
 window.downloadFile = downloadFile;
 window.renderApp = renderApp;
 
-/****************************************************
- * 10. Startup
- ****************************************************/
+/* Startup */
 onAuthStateChanged(auth, async (user) => {
     currentUserId = user ? user.uid : null;
     if (user) {
